@@ -1,11 +1,11 @@
-import { serve } from "https://deno.land/std@0.202.0/http/server.ts";
+// 1. 推荐：将旧版本的 std serve 替换为 Deno 原生内置的 serve (Deno Deploy 更稳定)
+// import { serve } from "https://deno.land/std@0.202.0/http/server.ts"; // 这行可以删除
 
 const TARGET_URL = "https://grok.com";
-const ORIGIN_DOMAIN = "grok.com"; // 注意：此处应仅为域名，不含协议
+const ORIGIN_DOMAIN = "grok.com"; 
 
 const AUTH_USERNAME = Deno.env.get("AUTH_USERNAME");
 const AUTH_PASSWORD = Deno.env.get("AUTH_PASSWORD");
-
 const COOKIE = Deno.env.get("cookie");
 
 // 验证函数
@@ -19,13 +19,14 @@ function isValidAuth(authHeader: string): boolean {
     return false;
   }
 }
+
 async function handleWebSocket(req: Request): Promise<Response> {
   const { socket: clientWs, response } = Deno.upgradeWebSocket(req);
 
   const url = new URL(req.url);
   const targetUrl = `wss://grok.com${url.pathname}${url.search}`;
 
-  console.log('Target URL:', targetUrl);
+  console.log('Target WebSocket URL:', targetUrl);
 
   const pendingMessages: string[] = [];
   const targetWs = new WebSocket(targetUrl);
@@ -37,7 +38,7 @@ async function handleWebSocket(req: Request): Promise<Response> {
   };
 
   clientWs.onmessage = (event) => {
-    console.log('Client message received');
+    // console.log('Client message received');
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.send(event.data);
     } else {
@@ -46,7 +47,7 @@ async function handleWebSocket(req: Request): Promise<Response> {
   };
 
   targetWs.onmessage = (event) => {
-    console.log('message received');
+    // console.log('message received');
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(event.data);
     }
@@ -60,19 +61,22 @@ async function handleWebSocket(req: Request): Promise<Response> {
   };
 
   targetWs.onclose = (event) => {
-    console.log('connection closed');
+    console.log('Target connection closed');
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.close(event.code, event.reason);
     }
   };
 
+  // ✅ 优化：如果远端 WebSocket 连不上，主动关闭客户端连接，防止卡死
   targetWs.onerror = (error) => {
-    console.error('WebSocket error:', error);
+    console.error('Target WebSocket error:', error);
+    if (clientWs.readyState === WebSocket.OPEN) {
+      clientWs.close(1011, "Target WebSocket error");
+    }
   };
 
   return response;
 }
-
 
 const handler = async (req: Request): Promise<Response> => {
   // Basic Auth 验证
@@ -97,9 +101,13 @@ const handler = async (req: Request): Promise<Response> => {
   const headers = new Headers(req.headers);
   headers.set("Host", targetUrl.host);
   headers.delete("Referer");
-  headers.delete("Cookie");
   headers.delete("Authorization"); // 删除验证头，不转发到目标服务器
-  headers.set("cookie", COOKIE || '');
+  
+  // ✅ 优化：只有在有 Cookie 环境变量时才设置，防止发送空 Cookie 导致 403
+  headers.delete("Cookie"); 
+  if (COOKIE) {
+    headers.set("Cookie", COOKIE);
+  }
 
   try {
     const proxyResponse = await fetch(targetUrl.toString(), {
@@ -128,15 +136,6 @@ const handler = async (req: Request): Promise<Response> => {
         const contentType = responseHeaders.get("Content-Type") || "";
         if (contentType.startsWith("text/") || contentType.includes("json")) {
           let text = new TextDecoder("utf-8", { stream: true }).decode(chunk);
-
-          //   if(contentType.includes("json"))
-          //   {
-          //       if(text.includes("streamingImageGenerationResponse"))
-          //       {
-          //           text = text.replaceAll('users/','https://assets.grok.com/users/');
-          //       }
-          //   }
-
           controller.enqueue(
             new TextEncoder().encode(text.replaceAll(TARGET_URL, ORIGIN_DOMAIN))
           );
@@ -146,7 +145,6 @@ const handler = async (req: Request): Promise<Response> => {
       }
     });
 
-    // 创建可读流
     const readableStream = proxyResponse.body?.pipeThrough(transformStream);
 
     return new Response(readableStream, {
@@ -158,4 +156,5 @@ const handler = async (req: Request): Promise<Response> => {
   }
 };
 
-serve(handler, { port: 8000 });
+// ✅ 核心修复：直接使用 Deno.serve，自动适配 Deno Deploy 端口
+Deno.serve(handler);
