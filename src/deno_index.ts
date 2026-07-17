@@ -1,14 +1,15 @@
-// 1. 推荐：将旧版本的 std serve 替换为 Deno 原生内置的 serve (Deno Deploy 更稳定)
-// import { serve } from "https://deno.land/std@0.202.0/http/server.ts"; // 这行可以删除
+// 注意：无需再导入 serve，直接使用 Deno 原生标准
 
 const TARGET_URL = "https://grok.com";
-const ORIGIN_DOMAIN = "grok.com"; 
+const ORIGIN_DOMAIN = "grok.com";
 
 const AUTH_USERNAME = Deno.env.get("AUTH_USERNAME");
 const AUTH_PASSWORD = Deno.env.get("AUTH_PASSWORD");
-const COOKIE = Deno.env.get("cookie");
 
-// 验证函数
+// 注意：这里严格对应用户环境变量里的键名，请务必在设置里写成小写 "cookie"
+const COOKIE = Deno.env.get("cookie"); 
+
+// Basic Auth 认证函数
 function isValidAuth(authHeader: string): boolean {
   try {
     const base64Credentials = authHeader.split(" ")[1];
@@ -32,13 +33,12 @@ async function handleWebSocket(req: Request): Promise<Response> {
   const targetWs = new WebSocket(targetUrl);
 
   targetWs.onopen = () => {
-    console.log('Connected to grok');
+    console.log('已连接到 grok WebSocket');
     pendingMessages.forEach(msg => targetWs.send(msg));
     pendingMessages.length = 0;
   };
 
   clientWs.onmessage = (event) => {
-    // console.log('Client message received');
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.send(event.data);
     } else {
@@ -47,31 +47,29 @@ async function handleWebSocket(req: Request): Promise<Response> {
   };
 
   targetWs.onmessage = (event) => {
-    // console.log('message received');
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.send(event.data);
     }
   };
 
   clientWs.onclose = (event) => {
-    console.log('Client connection closed');
+    console.log('客户端 WebSocket 已断开');
     if (targetWs.readyState === WebSocket.OPEN) {
       targetWs.close(1000, event.reason);
     }
   };
 
   targetWs.onclose = (event) => {
-    console.log('Target connection closed');
+    console.log('目标 WebSocket 已断开');
     if (clientWs.readyState === WebSocket.OPEN) {
       clientWs.close(event.code, event.reason);
     }
   };
 
-  // ✅ 优化：如果远端 WebSocket 连不上，主动关闭客户端连接，防止卡死
   targetWs.onerror = (error) => {
-    console.error('Target WebSocket error:', error);
+    console.error('目标 WebSocket 发生错误:', error);
     if (clientWs.readyState === WebSocket.OPEN) {
-      clientWs.close(1011, "Target WebSocket error");
+      clientWs.close(1011, "目标 WebSocket 错误");
     }
   };
 
@@ -79,7 +77,7 @@ async function handleWebSocket(req: Request): Promise<Response> {
 }
 
 const handler = async (req: Request): Promise<Response> => {
-  // Basic Auth 验证
+  // 1. 基础验证
   const authHeader = req.headers.get("Authorization");
   if (AUTH_USERNAME && AUTH_PASSWORD && (!authHeader || !isValidAuth(authHeader))) {
     return new Response("Unauthorized", {
@@ -90,20 +88,21 @@ const handler = async (req: Request): Promise<Response> => {
     });
   }
 
+  // 2. WebSocket 请求处理
   if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
     return handleWebSocket(req);
   }
 
+  // 3. 代理 HTTP 请求
   const url = new URL(req.url);
   const targetUrl = new URL(url.pathname + url.search, TARGET_URL);
 
-  // 构造代理请求
   const headers = new Headers(req.headers);
   headers.set("Host", targetUrl.host);
   headers.delete("Referer");
-  headers.delete("Authorization"); // 删除验证头，不转发到目标服务器
-  
-  // ✅ 优化：只有在有 Cookie 环境变量时才设置，防止发送空 Cookie 导致 403
+  headers.delete("Authorization"); // 不把基本认证头传给 grok
+
+  // 4. 核心修正：只有环境变量里配置了 cookie，才显式设置进去
   headers.delete("Cookie"); 
   if (COOKIE) {
     headers.set("Cookie", COOKIE);
@@ -117,20 +116,21 @@ const handler = async (req: Request): Promise<Response> => {
       redirect: "manual",
     });
 
-    // 处理响应头
     const responseHeaders = new Headers(proxyResponse.headers);
-    responseHeaders.delete("Content-Length"); // 移除固定长度头
+    responseHeaders.delete("Content-Length");
+
+    // 替换 Location 跳转
     const location = responseHeaders.get("Location");
     if (location) {
       responseHeaders.set("Location", location.replace(TARGET_URL, `https://${ORIGIN_DOMAIN}`));
     }
 
-    // 处理无响应体状态码
+    // 处理无内容的返回
     if ([204, 205, 304].includes(proxyResponse.status)) {
       return new Response(null, { status: proxyResponse.status, headers: responseHeaders });
     }
 
-    // 创建流式转换器
+    // 5. 流式替换 TARGET_URL (处理前端页面里的硬编码链接)
     const transformStream = new TransformStream({
       transform: async (chunk, controller) => {
         const contentType = responseHeaders.get("Content-Type") || "";
@@ -152,9 +152,10 @@ const handler = async (req: Request): Promise<Response> => {
       headers: responseHeaders,
     });
   } catch (error) {
+    console.error("代理请求出错:", error);
     return new Response(`Proxy Error: ${error.message}`, { status: 500 });
   }
 };
 
-// ✅ 核心修复：直接使用 Deno.serve，自动适配 Deno Deploy 端口
+// ✅ 关键修改：使用 Deno 原生 API 启动服务，完美适配 Deno Deploy
 Deno.serve(handler);
