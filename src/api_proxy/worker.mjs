@@ -1,6 +1,7 @@
 // worker.mjs - Grok API 转换层 (Deno Deploy 兼容)
-// 将 OpenAI 兼容请求 (/v1/chat/completions, /v1/models) 转换为
-// grok.com 内部 REST API 调用,并将 NDJSON 流转换为 OpenAI SSE 格式
+// - OpenAI 兼容端点: /v1/chat/completions, /v1/models, /health
+// - 实时探测 Grok 当前可用模型 (缓存 5 分钟)
+// - 自动适配模型名 (grok-3 / grok-4 / grok-4-fast / grok-4.5 / grok-4.5-reasoning ...)
 //
 // 环境变量:
 //   GROK_COOKIE  - grok.com 浏览器 Cookie(格式 "sso=ey...; sso-rw=ey...")
@@ -28,12 +29,28 @@ const DEFAULT_HEADERS = {
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 };
 
-const MODELS = [
-  { id: "grok-3", object: "model", created: 0, owned_by: "xAI" },
-  { id: "grok-3-reasoning", object: "model", created: 0, owned_by: "xAI" },
-  { id: "grok-3-mini", object: "model", created: 0, owned_by: "xAI" },
-  { id: "grok-3-fast", object: "model", created: 0, owned_by: "xAI" },
+// 候选模型清单(动态探测失败时的兜底,会逐步被实际可用模型覆盖)
+const CANDIDATE_MODELS = [
+  "grok-4.5",
+  "grok-4.5-reasoning",
+  "grok-4.5-fast",
+  "grok-4.5-heavy",
+  "grok-4",
+  "grok-4-reasoning",
+  "grok-4-fast",
+  "grok-3",
+  "grok-3-reasoning",
+  "grok-3-mini",
+  "grok-3-fast",
+  "grok-code-fast-1",
 ];
+
+// 模型缓存 (实时探测结果 + 兜底列表)
+let MODEL_CACHE = {
+  models: null, // string[] of grok.com modelNames
+  fetchedAt: 0,
+  ttlMs: 5 * 60 * 1000, // 5 分钟
+};
 
 // ---------- 工具函数 ----------
 
@@ -63,16 +80,13 @@ function errorJson(status, message) {
 
 // ---------- 匿名身份获取 ----------
 
-// 访问 grok.com 首页/登录页,从 302 响应 Set-Cookie 中提取匿名身份 cookie
 async function fetchAnonymousCookies() {
   const state = { xAnonuserid: null, xChallenge: null, xSignature: null };
-
   const urls = [
-    { url: `${GROK_BASE}/`, label: "home" },
-    { url: `${GROK_BASE}/i/flow/login`, label: "login" },
+    `${GROK_BASE}/`,
+    `${GROK_BASE}/i/flow/login`,
   ];
-
-  for (const { url } of urls) {
+  for (const url of urls) {
     try {
       const res = await fetch(url, {
         headers: {
@@ -101,15 +115,105 @@ async function fetchAnonymousCookies() {
   return cookieHeaderFromObject(state);
 }
 
+// ---------- 实时模型探测 ----------
+
+// 尝试多种可能的 grok.com 模型清单端点
+async function fetchModelsFromGrok(cookie) {
+  const endpoints = [
+    `${GROK_BASE}/rest/models`,
+    `${GROK_BASE}/api/models`,
+    `${GROK_BASE}/rest/app/models`,
+    `${GROK_BASE}/i/api/models`,
+    `${GROK_BASE}/rest/app-chat/models`,
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const headers = {
+        ...DEFAULT_HEADERS,
+        accept: "application/json",
+      };
+      if (cookie) headers.cookie = cookie;
+
+      const res = await fetch(ep, { method: "GET", headers });
+      if (!res.ok) continue;
+      const ct = res.headers.get("content-type") || "";
+      if (!ct.includes("json")) continue;
+
+      const data = await res.json();
+      // 尝试多种可能的模型数组字段
+      const list = data?.models ?? data?.data ?? data?.modelNames ?? data?.result?.models;
+      if (Array.isArray(list) && list.length > 0) {
+        const names = list
+          .map((m) => (typeof m === "string" ? m : m?.name ?? m?.id ?? m?.modelName))
+          .filter(Boolean);
+        if (names.length > 0) {
+          console.log(`[models] fetched ${names.length} models from ${ep}`);
+          return names;
+        }
+      }
+    } catch (e) {
+      console.error(`[models] probe ${ep} failed: ${e.message}`);
+    }
+  }
+  return null;
+}
+
+// 获取缓存的模型列表(过期则自动重新探测)
+async function getAvailableModels(cookie) {
+  const now = Date.now();
+  if (MODEL_CACHE.models && (now - MODEL_CACHE.fetchedAt) < MODEL_CACHE.ttlMs) {
+    return MODEL_CACHE.models;
+  }
+
+  // 先尝试从 grok.com 探测
+  let models = null;
+  if (cookie) {
+    try {
+      models = await fetchModelsFromGrok(cookie);
+    } catch (e) {
+      console.error("[models] live probe failed:", e.message);
+    }
+  }
+
+  // 探测失败则使用兜底候选 + 缓存兜底(去重)
+  if (!models || models.length === 0) {
+    const fallback = new Set(CANDIDATE_MODELS);
+    if (MODEL_CACHE.models) {
+      for (const m of MODEL_CACHE.models) fallback.add(m);
+    }
+    models = [...fallback];
+    console.log(`[models] using fallback: ${models.length} models`);
+  }
+
+  MODEL_CACHE = { models, fetchedAt: now, ttlMs: MODEL_CACHE.ttlMs };
+  return models;
+}
+
+// 对外暴露的 /v1/models 响应数据(OpenAI 兼容格式)
+function modelsToOpenAIList(names) {
+  return names.map((id) => ({ id, object: "model", created: 0, owned_by: "xAI" }));
+}
+
 // ---------- Grok 请求 ----------
 
+// 根据客户端传入的 model 名,智能构造 grok.com payload
+// - "grok-4.5-reasoning" → modelName="grok-4.5", isReasoning=true
+// - "grok-3" → modelName="grok-3", isReasoning=false
+// - "grok-4-fast" → modelName="grok-4-fast" 直接透传
 function buildPayload(message, model) {
+  // 智能识别 reasoning 后缀
   let modelName = model;
   let isReasoning = false;
-  if (model.endsWith("-reasoning")) {
-    modelName = model.replace("-reasoning", "");
-    isReasoning = true;
+  const REASONING_SUFFIXES = ["-reasoning", "-think", "-heavy"];
+  for (const suf of REASONING_SUFFIXES) {
+    if (model.endsWith(suf)) {
+      modelName = model.slice(0, -suf.length);
+      isReasoning = true;
+      break;
+    }
   }
+
   return {
     temporary: true,
     modelName,
@@ -133,7 +237,6 @@ function buildPayload(message, model) {
   };
 }
 
-// 发送消息到 grok.com,返回 Response
 async function sendToGrok(message, model, cookie) {
   const headers = { ...DEFAULT_HEADERS };
   if (cookie) headers.cookie = cookie;
@@ -153,8 +256,6 @@ async function sendToGrok(message, model, cookie) {
 
 // ---------- 流式解析: NDJSON -> OpenAI SSE ----------
 
-// 将 grok 的 NDJSON 流转换为 OpenAI 兼容 SSE 流
-// 返回新的 ReadableStream
 function ndjsonToSSE(body, { id, created, model, includeUsage = false }) {
   const encoder = new TextEncoder();
   const decoder = new TextDecoder("utf-8");
@@ -170,115 +271,115 @@ function ndjsonToSSE(body, { id, created, model, includeUsage = false }) {
 
   return new ReadableStream({
     async start(controller) {
-      const reader = body.getReader();
-      controller.enqueue(
-        writeChunk({
-          id, object: "chat.completion.chunk", created, model,
-          choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
-        })
-      );
+        const reader = body.getReader();
+        controller.enqueue(
+          writeChunk({
+            id, object: "chat.completion.chunk", created, model,
+            choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+          })
+        );
 
-      const flush = () => {
-        let idx;
-        while ((idx = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, idx).trim();
-          buffer = buffer.slice(idx + 1);
-          if (!line) continue;
-          try {
-            const j = JSON.parse(line);
-            const resp = j?.result?.response ?? {};
-            if (resp?.modelResponse) {
-              finalText = resp.modelResponse.message ?? "";
-              const delta = finalText.slice(fullText.length);
-              if (delta) {
-                fullText = finalText;
+        const flush = () => {
+          let idx;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+            if (!line) continue;
+            try {
+              const j = JSON.parse(line);
+              const resp = j?.result?.response ?? {};
+              if (resp?.modelResponse) {
+                finalText = resp.modelResponse.message ?? "";
+                const delta = finalText.slice(fullText.length);
+                if (delta) {
+                  fullText = finalText;
+                  controller.enqueue(
+                    writeChunk({
+                      id, object: "chat.completion.chunk", created, model,
+                      choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
+                    })
+                  );
+                }
+              } else {
+                const token = resp?.token ?? "";
+                if (token) {
+                  fullText += token;
+                  controller.enqueue(
+                    writeChunk({
+                      id, object: "chat.completion.chunk", created, model,
+                      choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
+                    })
+                  );
+                }
+              }
+              const usage = j?.usageMetadata ?? j?.result?.usageMetadata;
+              if (usage) {
+                promptTokens = usage.promptTokenCount ?? usage.prompt_tokens ?? promptTokens;
+                completionTokens = usage.candidatesTokenCount ?? usage.completion_tokens ?? completionTokens;
+                totalTokens = usage.totalTokenCount ?? usage.total_tokens ?? totalTokens;
+              }
+            } catch { /* 忽略非 JSON 行 */ }
+          }
+        };
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
+            flush();
+          }
+          if (buffer.trim()) {
+            try {
+              const j = JSON.parse(buffer.trim());
+              const resp = j?.result?.response ?? {};
+              if (resp?.token) {
+                fullText += resp.token;
                 controller.enqueue(
                   writeChunk({
                     id, object: "chat.completion.chunk", created, model,
-                    choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
+                    choices: [{ index: 0, delta: { content: resp.token }, finish_reason: null }],
                   })
                 );
               }
-            } else {
-              const token = resp?.token ?? "";
-              if (token) {
-                fullText += token;
-                controller.enqueue(
-                  writeChunk({
-                    id, object: "chat.completion.chunk", created, model,
-                    choices: [{ index: 0, delta: { content: token }, finish_reason: null }],
-                  })
-                );
-              }
-            }
-            const usage = j?.usageMetadata ?? j?.result?.usageMetadata;
-            if (usage) {
-              promptTokens = usage.promptTokenCount ?? usage.prompt_tokens ?? promptTokens;
-              completionTokens = usage.candidatesTokenCount ?? usage.completion_tokens ?? completionTokens;
-              totalTokens = usage.totalTokenCount ?? usage.total_tokens ?? totalTokens;
-            }
-          } catch { /* 忽略非 JSON 行 */ }
-        }
-      };
+            } catch { /* ignore */ }
+          }
 
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-          flush();
-        }
-        if (buffer.trim()) {
-          try {
-            const j = JSON.parse(buffer.trim());
-            const resp = j?.result?.response ?? {};
-            if (resp?.token) {
-              fullText += resp.token;
-              controller.enqueue(
-                writeChunk({
-                  id, object: "chat.completion.chunk", created, model,
-                  choices: [{ index: 0, delta: { content: resp.token }, finish_reason: null }],
-                })
-              );
-            }
-          } catch { /* ignore */ }
-        }
+          if (includeUsage && !usageSent && (promptTokens >= 0 || completionTokens >= 0)) {
+            controller.enqueue(
+              writeChunk({
+                id, object: "chat.completion.chunk", created, model,
+                choices: [{ index: 0, delta: {}, finish_reason: null }],
+                usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens },
+              })
+            );
+            usageSent = true;
+          }
 
-        if (includeUsage && !usageSent && (promptTokens >= 0 || completionTokens >= 0)) {
           controller.enqueue(
             writeChunk({
               id, object: "chat.completion.chunk", created, model,
-              choices: [{ index: 0, delta: {}, finish_reason: null }],
-              usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens },
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+              ...(includeUsage && !usageSent
+                ? { usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens } }
+                : {}),
             })
           );
-          usageSent = true;
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } catch (e) {
+          console.error("[stream] error:", e.message);
+          controller.enqueue(
+            writeChunk({
+              id, object: "chat.completion.chunk", created, model,
+              choices: [{ index: 0, delta: { content: `\n[Stream error: ${e.message}]` }, finish_reason: "error" }],
+            })
+          );
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        } finally {
+          try { controller.close(); } catch { /* ignore */ }
         }
-
-        controller.enqueue(
-          writeChunk({
-            id, object: "chat.completion.chunk", created, model,
-            choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-            ...(includeUsage && !usageSent
-              ? { usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: totalTokens } }
-              : {}),
-          })
-        );
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      } catch (e) {
-        console.error("[stream] error:", e.message);
-        controller.enqueue(
-          writeChunk({
-            id, object: "chat.completion.chunk", created, model,
-            choices: [{ index: 0, delta: { content: `\n[Stream error: ${e.message}]` }, finish_reason: "error" }],
-          })
-        );
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-      } finally {
-        try { controller.close(); } catch { /* ignore */ }
-      }
-    },
-  });
+      },
+    });
 }
 
 // 聚合 NDJSON 流为完整文本
@@ -352,7 +453,7 @@ async function handleChatCompletions(req) {
       ? lastUser.content
       : lastUser.content?.map((p) => p.text).join("\n") || "";
 
-  const model = body.model || "grok-3";
+  const model = body.model || "grok-4.5";
   const stream = !!body.stream;
   const includeUsage = !!body.stream_options?.include_usage;
 
@@ -386,7 +487,6 @@ async function handleChatCompletions(req) {
     });
   }
 
-  // 非流式: 聚合后返回完整 JSON
   let text;
   try {
     text = await collectText(grokRes.body);
@@ -407,7 +507,7 @@ async function handleChatCompletions(req) {
 
 export default {
   async fetch(req) {
-    // CORS 全开放(所有 OPTIONS 预检直接放行)
+    // CORS 全开放
     if (req.method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -434,22 +534,36 @@ export default {
     let res;
 
     if (url.pathname === "/v1/models" && req.method === "GET") {
-      res = json(200, { object: "list", data: MODELS });
+      // 实时探测 grok.com 模型清单(带 cookie 才能探测)
+      const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
+      const models = await getAvailableModels(cookie);
+      res = json(200, {
+        object: "list",
+        data: modelsToOpenAIList(models),
+        _meta: {
+          source: MODEL_CACHE.models === models && MODEL_CACHE.fetchedAt > 0 ? "live+fallback" : "live",
+          cache_age_seconds: MODEL_CACHE.fetchedAt ? Math.floor((Date.now() - MODEL_CACHE.fetchedAt) / 1000) : 0,
+        },
+      });
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       res = await handleChatCompletions(req);
     } else if (url.pathname === "/health" && req.method === "GET") {
-      res = json(200, { status: "ok", timestamp: new Date().toISOString() });
+      res = json(200, {
+        status: "ok",
+        timestamp: new Date().toISOString(),
+        model_cache_count: MODEL_CACHE.models?.length ?? 0,
+      });
     } else if (url.pathname === "/" && req.method === "GET") {
       res = json(200, {
         name: "Grok Proxy",
         endpoints: ["/v1/models", "/v1/chat/completions", "/health"],
-        model: "grok-3",
+        model: "grok-4.5",
+        note: "模型实时探测 / live model discovery",
       });
     } else {
       res = errorJson(404, "Not Found");
     }
 
-    // 附加 CORS 头
     const headers = new Headers(res.headers);
     headers.set("Access-Control-Allow-Origin", "*");
     return new Response(res.body, { status: res.status, headers });
