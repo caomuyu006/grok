@@ -545,6 +545,51 @@ export default {
           cache_age_seconds: MODEL_CACHE.fetchedAt ? Math.floor((Date.now() - MODEL_CACHE.fetchedAt) / 1000) : 0,
         },
       });
+    } else if (url.pathname === "/debug/probe-models" && req.method === "GET") {
+      // 一次性探测所有可能的模型清单端点(开发用)
+      const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
+      const probes = [
+        "https://grok.com/v1/models",
+        "https://grok.com/v1beta/models",
+        "https://grok.com/api/v1/models",
+        "https://grok.com/rest/v1/models",
+        "https://grok.com/rest/models",
+        "https://grok.com/rest/app/models",
+        "https://grok.com/rest/app-chat/models",
+        "https://grok.com/rest/models/list",
+        "https://grok.com/rest/app-chat/models/list",
+        "https://grok.com/rest/conversations/models",
+        "https://grok.com/i/api/models",
+        "https://grok.com/i/models",
+        "https://grok.com/api/models",
+        "https://grok.com/models",
+      ];
+      const results = [];
+      for (const ep of probes) {
+        try {
+          const r = await fetch(ep, {
+            method: "GET",
+            headers: {
+              "user-agent": DEFAULT_HEADERS["user-agent"],
+              "accept": "application/json, text/plain, */*",
+              "accept-language": "en-GB,en;q=0.9",
+              ...(cookie && { cookie }),
+            },
+            redirect: "manual",
+          });
+          const ct = r.headers.get("content-type") || "";
+          const text = (await r.text()).slice(0, 250);
+          results.push({
+            endpoint: ep,
+            status: r.status,
+            contentType: ct.split(";")[0],
+            preview: text.replace(/\n/g, " "),
+          });
+        } catch (e) {
+          results.push({ endpoint: ep, error: e.message });
+        }
+      }
+      res = json(200, { probe_results: results, has_cookie: !!cookie });
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       res = await handleChatCompletions(req);
     } else if (url.pathname === "/health" && req.method === "GET") {
