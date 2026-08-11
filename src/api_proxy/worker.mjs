@@ -583,7 +583,7 @@ export default {
           }
           const r = await fetch(ep, opts);
           const ct = r.headers.get("content-type") || "";
-          const text = (await r.text()).slice(0, 350);
+          const text = await r.text();
           results.push({
             endpoint: ep,
             method,
