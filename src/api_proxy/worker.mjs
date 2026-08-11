@@ -566,6 +566,61 @@ export default {
       res = json(200, { probe_results: results, has_cookie: !!cookie });
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       res = await handleChatCompletions(req);
+    } else if (url.pathname === "/debug/inspect-headers" && req.method === "GET") {
+      // 采集浏览器对话时的完整请求 (匿名访问 grok.com 首页, 收集响应头/cookie)
+      const collect = async (url, method = "GET", extraHeaders = {}) => {
+        const r = await fetch(url, {
+          method,
+          headers: {
+            "user-agent": DEFAULT_HEADERS["user-agent"],
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "accept-encoding": "gzip, deflate, br",
+            ...extraHeaders,
+          },
+          redirect: "follow",
+        });
+        const setCookies = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
+        return {
+          status: r.status,
+          url: r.url,
+          requestHeadersSent: { user_agent: DEFAULT_HEADERS["user-agent"], ...extraHeaders },
+          responseHeaders: Object.fromEntries(r.headers.entries()),
+          setCookieNames: setCookies.map(sc => sc.split("=")[0]),
+          contentLength: (await r.clone().text()).length,
+        };
+      };
+      const probes = [
+        { name: "grok.com homepage", url: "https://grok.com/" },
+        { name: "grok.com rest/app-chat/conversations/new (GET, 验证存在)", url: "https://grok.com/rest/app-chat/conversations/new" },
+        { name: "grok.com rest/app-chat/conversations/new (POST, 匿名)", url: "https://grok.com/rest/app-chat/conversations/new", method: "POST", body: { temporary: true, modelName: "grok-3", message: "hi" } },
+      ];
+      const results = [];
+      for (const p of probes) {
+        try {
+          const opts = { method: p.method };
+          if (p.body) {
+            opts.headers = { "content-type": "application/json" };
+            opts.body = JSON.stringify(p.body);
+          }
+          const r = await fetch(p.url, {
+            ...opts,
+            headers: { ...DEFAULT_HEADERS, ...(opts.headers || {}) },
+            redirect: "manual",
+          });
+          const setCookies = r.headers.getSetCookie ? r.headers.getSetCookie() : [];
+          results.push({
+            name: p.name,
+            status: r.status,
+            responseHeaders: Object.fromEntries(r.headers.entries()),
+            setCookies,
+            bodyPreview: (await r.text()).slice(0, 400),
+          });
+        } catch (e) {
+          results.push({ name: p.name, error: e.message });
+        }
+      }
+      res = json(200, { results });
     } else if (url.pathname === "/debug/test-chat" && req.method === "GET") {
       // 手动测试一次对话请求, 返回详细诊断信息 (仅诊断用)
       const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
