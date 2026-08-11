@@ -549,26 +549,26 @@ export default {
       // 一次性探测所有可能的模型清单端点(开发用)
       const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
       const probes = [
-        "https://grok.com/v1/models",
-        "https://grok.com/v1beta/models",
-        "https://grok.com/api/v1/models",
-        "https://grok.com/rest/v1/models",
-        "https://grok.com/rest/models",
-        "https://grok.com/rest/app/models",
-        "https://grok.com/rest/app-chat/models",
-        "https://grok.com/rest/models/list",
-        "https://grok.com/rest/app-chat/models/list",
-        "https://grok.com/rest/conversations/models",
-        "https://grok.com/i/api/models",
-        "https://grok.com/i/models",
-        "https://grok.com/api/models",
-        "https://grok.com/models",
+        // GET 探测
+        { ep: "https://grok.com/v1/models", method: "GET" },
+        { ep: "https://grok.com/v1beta/models", method: "GET" },
+        { ep: "https://grok.com/api/v1/models", method: "GET" },
+        { ep: "https://grok.com/rest/v1/models", method: "GET" },
+        { ep: "https://grok.com/rest/app/models", method: "GET" },
+        { ep: "https://grok.com/rest/app-chat/models", method: "GET" },
+        { ep: "https://grok.com/rest/models/list", method: "GET" },
+        { ep: "https://grok.com/rest/app-chat/models/list", method: "GET" },
+        { ep: "https://grok.com/rest/conversations/models", method: "GET" },
+        // /rest/models 已知存在, 但 501 = 仅允许 POST
+        { ep: "https://grok.com/rest/models", method: "POST", body: {} },
+        { ep: "https://grok.com/rest/models", method: "POST", body: { type: "all" } },
+        { ep: "https://grok.com/rest/models", method: "POST", body: { includeDeprecated: true } },
       ];
       const results = [];
-      for (const ep of probes) {
+      for (const { ep, method, body } of probes) {
         try {
-          const r = await fetch(ep, {
-            method: "GET",
+          const opts = {
+            method,
             headers: {
               "user-agent": DEFAULT_HEADERS["user-agent"],
               "accept": "application/json, text/plain, */*",
@@ -576,17 +576,23 @@ export default {
               ...(cookie && { cookie }),
             },
             redirect: "manual",
-          });
+          };
+          if (body) {
+            opts.headers["content-type"] = "application/json";
+            opts.body = JSON.stringify(body);
+          }
+          const r = await fetch(ep, opts);
           const ct = r.headers.get("content-type") || "";
-          const text = (await r.text()).slice(0, 250);
+          const text = (await r.text()).slice(0, 350);
           results.push({
             endpoint: ep,
+            method,
             status: r.status,
             contentType: ct.split(";")[0],
             preview: text.replace(/\n/g, " "),
           });
         } catch (e) {
-          results.push({ endpoint: ep, error: e.message });
+          results.push({ endpoint: ep, method, error: e.message });
         }
       }
       res = json(200, { probe_results: results, has_cookie: !!cookie });
