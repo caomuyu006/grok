@@ -23,28 +23,53 @@
 
 Cloudflare Workers 免费额度：每天 100,000 请求，全球节点，IP 信誉高，可绕过 grok.com 反爬虫拦截。
 
-**Step 1：登录 Cloudflare**
-打开 https://dash.cloudflare.com → 左侧 Compute → Workers & Pages → Create application → Create Worker
+#### A. 一键从 GitHub 部署（推荐）
 
-**Step 2：填个名字**
-例如 `grok-proxy`，点 Deploy 进入代码编辑页
+1. 打开 https://dash.cloudflare.com → 左侧 **Compute** → **Workers & Pages** → **Create application**
+2. 选择 **Pages** 标签 → 点击 **Connect to Git** → 授权 GitHub → 选 `caomuyu006/grok` 仓库
+3. **Project name**: 填 `grok-proxy`（或任意）
+4. **Build command**: 留空
+5. **Build output directory**: 留空
+6. 点击 **Save and Deploy** → 等待完成（1-2 分钟）
 
-**Step 3：粘贴代码**
-将 `src/api_proxy/worker.mjs` 全文内容粘贴到 Cloudflare 编辑器（覆盖默认代码）。该文件已是 Cloudflare Worker 兼容格式（`export default { async fetch(req, env) {} }`）。
+#### B. 手动部署（更简单·贴代码即可）
 
-**Step 4：设置环境变量**
-代码编辑页右侧 Settings → Variables and Secrets → Add
-- Variable name: `GROK_COOKIE`
-- Value: 你的 grok.com 浏览器 Cookie（推荐包含 `sso=` 和 `sso-rw=`）
-- 点 Encrypt 加密保存 → Deploy
+1. 打开 https://dash.cloudflare.com → **Compute** → **Workers & Pages** → **Create application** → **Create Worker**
+2. 填名字如 `grok-proxy` → Deploy
+3. 进入代码编辑页 → 打开本地文件 `F:\AI工作夹\软件逆向\grok\grok-main\src\api_proxy\worker.mjs` → 全选复制 → 粘贴到 Cloudflare 编辑器（覆盖默认代码）→ Save and Deploy
 
-**Step 5：测试**
-浏览器访问 `https://grok-proxy.<你的子域>.workers.dev/v1/models`，看到 JSON 列表即成功。
+#### 设置环境变量
 
-**获取 cookie 步骤**：
-1. 浏览器打开 https://grok.com 并登录账号
-2. F12 → Application → Cookies → 复制 `sso` 和 `sso-rw` 的值
-3. 格式：`sso=eyJ...; sso-rw=eyJ...`（分号分隔）
+进入 Worker 详情页 → **Settings** → **Variables and Secrets** → **Add**
+
+| Variable name | Value | 加密? |
+|--------------|------|------|
+| `GROK_COOKIE` | `sso=eyJ...; sso-rw=eyJ...` | ✅ 加密 |
+| `AUTH_USERNAME` | 可选·Basic Auth 用户名 | ✅ |
+| `AUTH_PASSWORD` | 可选·Basic Auth 密码 | ✅ |
+
+设完点 **Deploy** 重新部署。
+
+#### 获取 Cookie 步骤
+
+1. Chrome / Edge 打开 https://grok.com 并登录 X 账号
+2. F12 → **Application** 标签 → **Cookies** → `https://grok.com`
+3. 找到这两个并复制 Value:
+ - `sso` (长串 eyJ... 开头的 JWT)
+ - `sso-rw` (同上)
+4. 拼接: `sso=eyJ...; sso-rw=eyJ...` (分号分隔, 空格可选)
+
+#### 验证部署成功
+
+浏览器访问：`https://grok-proxy.<你的子域>.workers.dev/v1/models`
+看到 JSON 数组即成功。
+
+#### Cherry Studio 配置
+
+- API 类型: **OpenAI**
+- API 地址: `https://grok-proxy.<你的子域>.workers.dev/v1`
+- API Key: 任意字符串（如 `grok-proxy`，仅装饰用）
+- 模型: `grok-3` 或 `grok-4`
 
 ### 方式二：Deno Deploy 部署（免费但可能被反爬虫拦截）
 
