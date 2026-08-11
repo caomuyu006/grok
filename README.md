@@ -19,7 +19,34 @@
 
 ## 快速开始
 
-### 方式一：Deno Deploy 部署（推荐·免费·永久在线）
+### 方式一：Cloudflare Workers 部署（推荐·免费·永久在线）
+
+Cloudflare Workers 免费额度：每天 100,000 请求，全球节点，IP 信誉高，可绕过 grok.com 反爬虫拦截。
+
+**Step 1：登录 Cloudflare**
+打开 https://dash.cloudflare.com → 左侧 Compute → Workers & Pages → Create application → Create Worker
+
+**Step 2：填个名字**
+例如 `grok-proxy`，点 Deploy 进入代码编辑页
+
+**Step 3：粘贴代码**
+将 `src/api_proxy/worker.mjs` 全文内容粘贴到 Cloudflare 编辑器（覆盖默认代码）。该文件已是 Cloudflare Worker 兼容格式（`export default { async fetch(req, env) {} }`）。
+
+**Step 4：设置环境变量**
+代码编辑页右侧 Settings → Variables and Secrets → Add
+- Variable name: `GROK_COOKIE`
+- Value: 你的 grok.com 浏览器 Cookie（推荐包含 `sso=` 和 `sso-rw=`）
+- 点 Encrypt 加密保存 → Deploy
+
+**Step 5：测试**
+浏览器访问 `https://grok-proxy.<你的子域>.workers.dev/v1/models`，看到 JSON 列表即成功。
+
+**获取 cookie 步骤**：
+1. 浏览器打开 https://grok.com 并登录账号
+2. F12 → Application → Cookies → 复制 `sso` 和 `sso-rw` 的值
+3. 格式：`sso=eyJ...; sso-rw=eyJ...`（分号分隔）
+
+### 方式二：Deno Deploy 部署（免费但可能被反爬虫拦截）
 
 Deno Deploy 是 Deno 官方边缘计算平台，有免费额度，海外节点可直连 grok.com。
 

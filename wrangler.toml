@@ -1,0 +1,14 @@
+#:schema node_modules/wrangler/config-schema.json
+name = "grok-proxy"
+main = "src/api_proxy/worker.mjs"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# 变量在 Cloudflare 控制台设置:
+# Settings → Variables → Environment Variables 添加:
+#   GROK_COOKIE = "sso=ey...; sso-rw=ey..."
+#   AUTH_USERNAME = "" (可选)
+#   AUTH_PASSWORD = "" (可选)
+
+[observability]
+enabled = true

@@ -8,6 +8,25 @@
 //                  留空则使用匿名免登录模式(自动获取匿名身份 cookie)
 //   AUTH_USERNAME / AUTH_PASSWORD - 可选 Basic Auth 保护
 
+// 环境变量 shim: 兼容 Deno Deploy 和 Cloudflare Workers/Pages
+// - Deno: 通过 Deno.env.get 获取
+// - Cloudflare Workers: 通过 fetch(req, env, ctx) 第二参数注入
+// - 全局 _env 被 fetch 入口覆盖赋值, Deno.env.get 调用时优先读 _env
+const _globalEnv = (typeof globalThis !== "undefined" ? globalThis : self)._env || {};
+const _envShim = {
+  get(name) {
+    if (typeof Deno !== "undefined" && Deno.env) {
+      try { return Deno.env.get(name); } catch (_) {}
+    }
+    return _globalEnv[name] ?? "";
+  },
+};
+if (typeof Deno === "undefined") {
+  // Cloudflare Workers 路径: 初始化 Deno 代理, 用 _envShim 代替
+  // 只需要保证 Deno.env.get 可调用
+  globalThis.Deno = { env: _envShim };
+}
+
 const GROK_BASE = "https://grok.com";
 const CHAT_ENDPOINT = `${GROK_BASE}/rest/app-chat/conversations/new`;
 
@@ -499,7 +518,9 @@ async function handleChatCompletions(req) {
 // ---------- Worker 入口 ----------
 
 export default {
-  async fetch(req) {
+  async fetch(req, env) {
+    // 注入环境变量 (Cloudflare Workers 路径)
+    if (env) globalThis._env = env;
     // CORS 全开放
     if (req.method === "OPTIONS") {
       return new Response(null, {
