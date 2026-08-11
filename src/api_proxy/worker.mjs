@@ -45,13 +45,6 @@ const CANDIDATE_MODELS = [
   "grok-code-fast-1",
 ];
 
-// 模型缓存 (实时探测结果 + 兜底列表)
-let MODEL_CACHE = {
-  models: null, // string[] of grok.com modelNames
-  fetchedAt: 0,
-  ttlMs: 5 * 60 * 1000, // 5 分钟
-};
-
 // ---------- 工具函数 ----------
 
 function genId() {
@@ -115,84 +108,68 @@ async function fetchAnonymousCookies() {
   return cookieHeaderFromObject(state);
 }
 
-// ---------- 实时模型探测 ----------
+// ---------- 实时模型清单 (参照 gemini-main 直接转发 Grok 官方响应) ----------
 
-// 尝试多种可能的 grok.com 模型清单端点
-async function fetchModelsFromGrok(cookie) {
-  const endpoints = [
-    `${GROK_BASE}/rest/models`,
-    `${GROK_BASE}/api/models`,
-    `${GROK_BASE}/rest/app/models`,
-    `${GROK_BASE}/i/api/models`,
-    `${GROK_BASE}/rest/app-chat/models`,
-  ];
+// Grok.com 唯一面向用户的模型清单端点: POST https://grok.com/rest/models
+// 响应结构: { models: [{ modelId, name, modelMode, tags, ... }], defaultFreeModel, defaultProModel, ... }
+// tag 含 "SKIP_LIST_MODES" 表示该模型仅供内部使用, 不向用户公开
+const GROK_MODELS_ENDPOINT = `${GROK_BASE}/rest/models`;
 
-  for (const ep of endpoints) {
-    try {
-      const headers = {
+// 实时从 Grok 官方拉取当前可用模型 (无缓存, 每次 /v1/models 请求都会刷新)
+// 失败则返回 CANDIDATE_MODELS 兑底列表
+async function fetchLiveModels(cookie) {
+  if (!cookie) {
+    console.log("[models] no cookie, using fallback list");
+    return [...CANDIDATE_MODELS];
+  }
+
+  try {
+    const res = await fetch(GROK_MODELS_ENDPOINT, {
+      method: "POST",
+      headers: {
         ...DEFAULT_HEADERS,
         accept: "application/json",
-      };
-      if (cookie) headers.cookie = cookie;
+        cookie,
+      },
+      body: JSON.stringify({}), // 空 body 也能返回完整列表
+    });
 
-      const res = await fetch(ep, { method: "GET", headers });
-      if (!res.ok) continue;
-      const ct = res.headers.get("content-type") || "";
-      if (!ct.includes("json")) continue;
-
-      const data = await res.json();
-      // 尝试多种可能的模型数组字段
-      const list = data?.models ?? data?.data ?? data?.modelNames ?? data?.result?.models;
-      if (Array.isArray(list) && list.length > 0) {
-        const names = list
-          .map((m) => (typeof m === "string" ? m : m?.name ?? m?.id ?? m?.modelName))
-          .filter(Boolean);
-        if (names.length > 0) {
-          console.log(`[models] fetched ${names.length} models from ${ep}`);
-          return names;
-        }
-      }
-    } catch (e) {
-      console.error(`[models] probe ${ep} failed: ${e.message}`);
+    if (!res.ok) {
+      console.error(`[models] grok.com ${res.status}`);
+      return [...CANDIDATE_MODELS];
     }
+
+    const data = await res.json();
+    const models = Array.isArray(data?.models) ? data.models : [];
+
+    // 仅保留面向用户的模型: 过滤掉带 SKIP_LIST_MODES tag 的内部模型
+    const visible = models
+      .filter((m) => m && m.modelId && !(m.tags || []).includes("SKIP_LIST_MODES"))
+      .map((m) => m.modelId);
+
+    // 动态加入默认订阅模型 (Pro/Heavy), 普通用户也能看到 (调用才报错)
+    const defaults = [data.defaultFreeModel, data.defaultProModel, data.defaultAnonModel, data.defaultHeavyModel]
+      .filter(Boolean)
+      .filter((id, idx, arr) => arr.indexOf(id) === idx);
+
+    const allIds = Array.from(new Set([...visible, ...defaults, ...CANDIDATE_MODELS]));
+    console.log(`[models] live: ${visible.length} visible, ${defaults.length} defaults, ${allIds.length} total`);
+    return allIds;
+  } catch (e) {
+    console.error(`[models] live fetch failed: ${e.message}`);
+    return [...CANDIDATE_MODELS];
   }
-  return null;
 }
 
-// 获取缓存的模型列表(过期则自动重新探测)
-async function getAvailableModels(cookie) {
-  const now = Date.now();
-  if (MODEL_CACHE.models && (now - MODEL_CACHE.fetchedAt) < MODEL_CACHE.ttlMs) {
-    return MODEL_CACHE.models;
-  }
-
-  // 先尝试从 grok.com 探测
-  let models = null;
-  if (cookie) {
-    try {
-      models = await fetchModelsFromGrok(cookie);
-    } catch (e) {
-      console.error("[models] live probe failed:", e.message);
-    }
-  }
-
-  // 探测失败则使用兜底候选 + 缓存兜底(去重)
-  if (!models || models.length === 0) {
-    const fallback = new Set(CANDIDATE_MODELS);
-    if (MODEL_CACHE.models) {
-      for (const m of MODEL_CACHE.models) fallback.add(m);
-    }
-    models = [...fallback];
-    console.log(`[models] using fallback: ${models.length} models`);
-  }
-
-  MODEL_CACHE = { models, fetchedAt: now, ttlMs: MODEL_CACHE.ttlMs };
-  return models;
-}
-
-// 对外暴露的 /v1/models 响应数据(OpenAI 兼容格式)
-function modelsToOpenAIList(names) {
-  return names.map((id) => ({ id, object: "model", created: 0, owned_by: "xAI" }));
+// 对外暴露的 /v1/models 响应数据 (OpenAI 兼容格式)
+// 实时从 grok.com 拉取, 失败返回兑底 (与 gemini-main 行为一致)
+async function handleModelsList() {
+  const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
+  const names = await fetchLiveModels(cookie);
+  return json(200, {
+    object: "list",
+    data: names.map((id) => ({ id, object: "model", created: 0, owned_by: "xAI" })),
+  });
 }
 
 // ---------- Grok 请求 ----------
@@ -534,17 +511,8 @@ export default {
     let res;
 
     if (url.pathname === "/v1/models" && req.method === "GET") {
-      // 实时探测 grok.com 模型清单(带 cookie 才能探测)
-      const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
-      const models = await getAvailableModels(cookie);
-      res = json(200, {
-        object: "list",
-        data: modelsToOpenAIList(models),
-        _meta: {
-          source: MODEL_CACHE.models === models && MODEL_CACHE.fetchedAt > 0 ? "live+fallback" : "live",
-          cache_age_seconds: MODEL_CACHE.fetchedAt ? Math.floor((Date.now() - MODEL_CACHE.fetchedAt) / 1000) : 0,
-        },
-      });
+      // 实时从 grok.com 拉取模型清单 (参照 gemini-main)
+      res = await handleModelsList();
     } else if (url.pathname === "/debug/probe-models" && req.method === "GET") {
       // 一次性探测所有可能的模型清单端点(开发用)
       const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
@@ -602,7 +570,6 @@ export default {
       res = json(200, {
         status: "ok",
         timestamp: new Date().toISOString(),
-        model_cache_count: MODEL_CACHE.models?.length ?? 0,
       });
     } else if (url.pathname === "/" && req.method === "GET") {
       res = json(200, {
