@@ -14,6 +14,7 @@ const CHAT_ENDPOINT = `${GROK_BASE}/rest/app-chat/conversations/new`;
 const DEFAULT_HEADERS = {
   "accept": "*/*",
   "accept-language": "en-GB,en;q=0.9",
+  "accept-encoding": "gzip, deflate, br",
   "content-type": "application/json",
   "origin": "https://grok.com",
   "priority": "u=1, i",
@@ -24,6 +25,8 @@ const DEFAULT_HEADERS = {
   "sec-fetch-dest": "empty",
   "sec-fetch-mode": "cors",
   "sec-fetch-site": "same-origin",
+  "sec-fetch-user": "?1",
+  "sec-fetch-storage-access": "active",
   "sec-gpc": "1",
   "user-agent":
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
