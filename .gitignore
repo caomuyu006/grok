@@ -1,0 +1,12 @@
+# Deno
+deno.lock
+# Node (本项目已转为 Deno 原生,以下为历史残留)
+node_modules/
+npm-debug.log*
+package-lock.json
+# OS
+.DS_Store
+Thumbs.db
+# 本地环境
+.env
+.env.local

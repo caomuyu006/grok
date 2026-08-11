@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  grok-proxy:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      - PORT=8000
+      # 可选: 填写 grok.com 浏览器 Cookie(格式: "sso=ey...; sso-rw=ey...")
+      # 留空则使用匿名免登录模式(有限额)
+      - GROK_COOKIE=
+      # 可选: 开启 Basic Auth 保护
+      # - AUTH_USERNAME=admin
+      # - AUTH_PASSWORD=changeme
+    restart: always

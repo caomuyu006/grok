@@ -1,0 +1,15 @@
+{
+    "name": "grok-proxy",
+    "version": "1.0.0",
+    "description": "Grok API Proxy - OpenAI-compatible API for Grok 3",
+    "type": "module",
+    "private": true,
+    "main": "src/server.mjs",
+    "scripts": {
+        "start": "node src/server.mjs",
+        "dev": "node --watch src/server.mjs"
+    },
+    "engines": {
+        "node": ">=18.0.0"
+    }
+}
