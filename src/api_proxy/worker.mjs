@@ -73,39 +73,51 @@ function errorJson(status, message) {
 
 // ---------- 匿名身份获取 ----------
 
-async function fetchAnonymousCookies() {
-  const state = { xAnonuserid: null, xChallenge: null, xSignature: null };
-  const urls = [
-    `${GROK_BASE}/`,
-    `${GROK_BASE}/i/flow/login`,
-  ];
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, {
-        headers: {
-          "user-agent": DEFAULT_HEADERS["user-agent"],
-          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "accept-language": "en-US,en;q=0.9",
-        },
-        redirect: "manual",
-      });
-      const setCookies = res.headers.getSetCookie?.() ?? [];
-      for (const sc of setCookies) {
-        const [pair] = sc.split(";");
-        const idx = pair.indexOf("=");
-        if (idx < 0) continue;
-        const key = pair.slice(0, idx).trim();
-        const value = pair.slice(idx + 1).trim();
-        if (key === "x-anonuserid") state.xAnonuserid = value;
-        else if (key === "x-challenge") state.xChallenge = value;
-        else if (key === "x-signature") state.xSignature = value;
-      }
-      if (state.xAnonuserid && state.xChallenge && state.xSignature) break;
-    } catch (e) {
-      console.error(`[anonymous] ${url} failed: ${e.message}`);
+// 温跹 grok.com: 访问首页采集所有 cookie (包括 Cloudflare __cf_bm 反爬虫 cookie)
+// 返回合并后的 cookie header: 种子 cookie (env) + CF 反爬虫 cookie + x-anonuserid 等
+async function warmupCookies(seedCookie) {
+  const jar = {};
+  // 解析种子 cookie
+  if (seedCookie) {
+    for (const part of seedCookie.split(";")) {
+      const idx = part.indexOf("=");
+      if (idx < 0) continue;
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      if (k) jar[k] = v;
     }
   }
-  return cookieHeaderFromObject(state);
+
+  // 访问 grok.com 首页, 采集 __cf_bm 等反爬虫 cookie
+  try {
+    const res = await fetch(`${GROK_BASE}/`, {
+      headers: {
+        ...DEFAULT_HEADERS,
+        accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        ...(Object.keys(jar).length > 0 && { cookie: cookieHeaderFromObject(jar) }),
+      },
+      redirect: "follow",
+    });
+    const setCookies = res.headers.getSetCookie?.() ?? [];
+    for (const sc of setCookies) {
+      const [pair] = sc.split(";");
+      const idx = pair.indexOf("=");
+      if (idx < 0) continue;
+      const key = pair.slice(0, idx).trim();
+      const value = pair.slice(idx + 1).trim();
+      if (key) jar[key] = value;
+    }
+    await res.body?.cancel();
+  } catch (e) {
+    console.error(`[warmup] homepage failed: ${e.message}`);
+  }
+
+  return cookieHeaderFromObject(jar);
+}
+
+// 匿名身份获取 (依赖 warmupCookies)
+async function fetchAnonymousCookies() {
+  return warmupCookies(null);
 }
 
 // ---------- 实时模型清单 (参照 gemini-main 直接转发 Grok 官方响应) ----------
@@ -435,11 +447,12 @@ async function handleChatCompletions(req) {
   const includeUsage = !!body.stream_options?.include_usage;
 
   // 获取 cookie: 环境变量优先,否则匿名
+  // 温跹流程: 访问 grok.com 采集 CF __cf_bm 等反爬虫 cookie 后再发对话请求
   let cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
   try {
-    if (!cookie) cookie = await fetchAnonymousCookies();
+    cookie = await warmupCookies(cookie || null);
   } catch (e) {
-    console.error("[anon] failed:", e.message);
+    console.error("[warmup] failed:", e.message);
   }
 
   let grokRes;
