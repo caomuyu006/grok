@@ -566,6 +566,54 @@ export default {
       res = json(200, { probe_results: results, has_cookie: !!cookie });
     } else if (url.pathname === "/v1/chat/completions" && req.method === "POST") {
       res = await handleChatCompletions(req);
+    } else if (url.pathname === "/debug/test-chat" && req.method === "GET") {
+      // 手动测试一次对话请求, 返回详细诊断信息 (仅诊断用)
+      const cookie = Deno.env.get("GROK_COOKIE") || Deno.env.get("cookie") || "";
+      const reqBody = {
+        temporary: true,
+        modelName: "grok-3",
+        message: "hi",
+        fileAttachments: [],
+        imageAttachments: [],
+        disableSearch: false,
+        enableImageGeneration: false,
+        returnImageBytes: false,
+        returnRawGrokInXaiRequest: false,
+        enableImageStreaming: false,
+        imageGenerationCount: 0,
+        forceConcise: false,
+        toolOverrides: {},
+        enableSideBySide: true,
+        isPreset: false,
+        sendFinalMetadata: true,
+        customInstructions: "",
+        deepsearchPreset: "",
+        isReasoning: false,
+      };
+      const headers = { ...DEFAULT_HEADERS };
+      if (cookie) headers.cookie = cookie;
+      let debugRes = { ok: false };
+      try {
+        const r = await fetch(CHAT_ENDPOINT, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(reqBody),
+        });
+        const t = await r.text();
+        debugRes = {
+          ok: r.ok,
+          status: r.status,
+          statusText: r.statusText,
+          responseHeaders: Object.fromEntries(r.headers.entries()),
+          body: t.slice(0, 1500),
+          sentHeaders: { ...headers, cookie: cookie ? "[REDACTED " + cookie.length + " chars]" : "" },
+          sentBodySize: JSON.stringify(reqBody).length,
+          cookieLength: cookie.length,
+        };
+      } catch (e) {
+        debugRes = { error: e.message };
+      }
+      res = json(200, debugRes);
     } else if (url.pathname === "/health" && req.method === "GET") {
       res = json(200, {
         status: "ok",
